@@ -23,6 +23,7 @@ func (transactionIDSetter) AddTo(m *Message) error {
 var TransactionID Setter = transactionIDSetter{}
 
 func MustBuild(setters ...Setter) *Message {
+	setters = append(setters, TransactionID)
 	m, err := Build(setters...)
 	if err != nil {
 		panic(err)
