@@ -1,6 +1,9 @@
 package p2pclient
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/cocobao/cocostun/stun"
 )
 
@@ -13,7 +16,7 @@ func NewP2PClient(serverAddr string, softwareName string) (*P2PClient, error) {
 	cli := &P2PClient{
 		serverAddr:   serverAddr,
 		softwareName: softwareName,
-		c:            sc,
+		sc:           sc,
 	}
 
 	return cli, nil
@@ -22,16 +25,24 @@ func NewP2PClient(serverAddr string, softwareName string) (*P2PClient, error) {
 type P2PClient struct {
 	serverAddr   string
 	softwareName string
-
-	c *stun.Client
+	sc           *stun.Client
 }
 
 func (c *P2PClient) SetSoftwareName(name string) {
 	c.softwareName = name
 }
 
-func (c *P2PClient) sendBindRequest() {
-
+//发送绑定请求
+func (c *P2PClient) sendBindRequest(changeIP bool, changePort bool) {
+	message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	message.AddSoftwareAttribute(c.softwareName)
+	if changeIP || changePort {
+		message.AddChangeReqAttribute(changeIP, changePort)
+	}
+	message.AddFingerprintAttribute()
+	c.sc.Do(message, time.Now().Add(time.Second*5), func(res stun.AgentEvent) {
+		fmt.Println(res.Message.Attributes)
+	})
 }
 
 // Figure 2: Flow for type discovery process (from RFC 3489).

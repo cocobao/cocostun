@@ -1,5 +1,9 @@
 package stun
 
+import (
+	"hash/crc32"
+)
+
 type Attributes []RawAttribute
 
 func (a Attributes) Get(t AttrType) (RawAttribute, bool) {
@@ -27,16 +31,34 @@ type RawAttribute struct {
 
 type AttrType uint16
 
+func (t AttrType) Value() uint16 {
+	return uint16(t)
+}
+
 // Attributes from comprehension-required range (0x0000-0x7FFF).
 const (
-	AttrMappedAddress     AttrType = 0x0001 // MAPPED-ADDRESS
-	AttrUsername          AttrType = 0x0006 // USERNAME
-	AttrMessageIntegrity  AttrType = 0x0008 // MESSAGE-INTEGRITY
-	AttrErrorCode         AttrType = 0x0009 // ERROR-CODE
-	AttrUnknownAttributes AttrType = 0x000A // UNKNOWN-ATTRIBUTES
-	AttrRealm             AttrType = 0x0014 // REALM
-	AttrNonce             AttrType = 0x0015 // NONCE
-	AttrXORMappedAddress  AttrType = 0x0020 // XOR-MAPPED-ADDRESS
+	AttrMappedAddress          AttrType = 0x0001 // MAPPED-ADDRESS
+	AttrResponseAddress        AttrType = 0x0002
+	AttrChangeRequest          AttrType = 0x0003
+	AttrSourceAddress          AttrType = 0x0004
+	AttrChangedAddress         AttrType = 0x0005
+	AttrUsername               AttrType = 0x0006 // USERNAME
+	AttrPassword               AttrType = 0x0007
+	AttrMessageIntegrity       AttrType = 0x0008 // MESSAGE-INTEGRITY
+	AttrErrorCode              AttrType = 0x0009 // ERROR-CODE
+	AttrUnknownAttributes      AttrType = 0x000A // UNKNOWN-ATTRIBUTES
+	AttrReflectedFrom          AttrType = 0x000b
+	AttrBandwidth              AttrType = 0x0010
+	AttrXorPeerAddress         AttrType = 0x0012
+	AttrRealm                  AttrType = 0x0014 // REALM
+	AttrNonce                  AttrType = 0x0015 // NONCE
+	AttrXorRelayedAddress      AttrType = 0x0016
+	AttrRequestedAddressFamily AttrType = 0x0017
+	AttrXORMappedAddress       AttrType = 0x0020 // XOR-MAPPED-ADDRESS
+	AttrTimerVal               AttrType = 0x0021
+	AttrPadding                AttrType = 0x0026
+	AttrResponsePort           AttrType = 0x0027
+	AttrConnectionID           AttrType = 0x002a
 )
 
 // Attributes from comprehension-optional range (0x8000-0xFFFF).
@@ -66,3 +88,28 @@ const (
 	AttrDontFragment       AttrType = 0x001A // DONT-FRAGMENT
 	AttrReservationToken   AttrType = 0x0022 // RESERVATION-TOKEN
 )
+
+//添加软件名称属性
+func (m *Message) AddSoftwareAttribute(name string) {
+	m.Add(AttrSoftware, []byte(name))
+}
+
+//添加指纹属性
+func (m *Message) AddFingerprintAttribute() {
+	crc := crc32.ChecksumIEEE(m.Raw) ^ fingerprint
+	buf := make([]byte, 4)
+	bin.PutUint32(buf, crc)
+	m.Add(AttrSoftware, []byte(buf))
+}
+
+//添加切换端口或ip请求
+func (m *Message) AddChangeReqAttribute(changeIP bool, changePort bool) {
+	value := make([]byte, 4)
+	if changeIP {
+		value[3] |= 0x04
+	}
+	if changePort {
+		value[3] |= 0x02
+	}
+	m.Add(AttrChangeRequest, value)
+}

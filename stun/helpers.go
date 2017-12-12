@@ -8,19 +8,7 @@ type (
 	Getter interface {
 		GetFrom(m *Message) error
 	}
-
-	Checker interface {
-		Check(m *Message) error
-	}
 )
-
-type transactionIDSetter struct{}
-
-func (transactionIDSetter) AddTo(m *Message) error {
-	return m.NewTransactionID()
-}
-
-var TransactionID Setter = transactionIDSetter{}
 
 func MustBuild(setters ...Setter) *Message {
 	setters = append(setters, TransactionID)
@@ -34,4 +22,12 @@ func MustBuild(setters ...Setter) *Message {
 func Build(setters ...Setter) (*Message, error) {
 	m := new(Message)
 	return m, m.Build(setters...)
+}
+
+var TransactionID Setter = transactionIDSetter{}
+
+type transactionIDSetter struct{}
+
+func (transactionIDSetter) AddTo(m *Message) error {
+	return m.NewTransactionID()
 }

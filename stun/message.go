@@ -173,6 +173,64 @@ func (m *Message) Decode() error {
 	return nil
 }
 
+//写入属性
+func (m *Message) WriteAttributes() {
+	for _, a := range m.Attributes {
+		m.Add(a.Type, a.Value)
+	}
+}
+
+func (m *Message) Add(t AttrType, v []byte) {
+	// Allocating buffer for TLV (type-length-value).
+	// T = t, L = len(v), V = v.
+	// m.Raw will look like:
+	// [0:20]                               <- message header
+	// [20:20+m.Length]                     <- existing message attributes
+	// [20+m.Length:20+m.Length+len(v) + 4] <- allocated buffer for new TLV
+	// [first:last]                         <- same as previous
+	// [0 1|2 3|4    4 + len(v)]            <- mapping for allocated buffer
+	//   T   L        V
+	allocSize := attributeHeaderSize + len(v)  // len(TLV) = len(TL) + len(V)
+	first := messageHeaderSize + int(m.Length) // first byte number
+	last := first + allocSize                  // last byte number
+	m.grow(last)                               // growing cap(Raw) to fit TLV
+	m.Raw = m.Raw[:last]                       // now len(Raw) = last
+	m.Length += uint32(allocSize)              // rendering length change
+
+	// Sub-slicing internal buffer to simplify encoding.
+	buf := m.Raw[first:last]           // slice for TLV
+	value := buf[attributeHeaderSize:] // slice for V
+	attr := RawAttribute{
+		Type:   t,              // T
+		Length: uint16(len(v)), // L
+		Value:  value,          // V
+	}
+
+	// Encoding attribute TLV to allocated buffer.
+	bin.PutUint16(buf[0:2], attr.Type.Value()) // T
+	bin.PutUint16(buf[2:4], attr.Length)       // L
+	copy(value, v)                             // V
+
+	// Checking that attribute value needs padding.
+	if attr.Length%padding != 0 {
+		// Performing padding.
+		bytesToAdd := nearestPaddedValueLength(len(v)) - len(v)
+		last += bytesToAdd
+		m.grow(last)
+		// setting all padding bytes to zero
+		// to prevent data leak from previous
+		// data in next bytesToAdd bytes
+		buf = m.Raw[last-bytesToAdd : last]
+		for i := range buf {
+			buf[i] = 0
+		}
+		m.Raw = m.Raw[:last]           // increasing buffer length
+		m.Length += uint32(bytesToAdd) // rendering length change
+	}
+	m.Attributes = append(m.Attributes, attr)
+	m.WriteLength()
+}
+
 //初始化消息结构
 func (m *Message) Reset() {
 	m.Raw = m.Raw[:0]
