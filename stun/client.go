@@ -3,7 +3,6 @@ package stun
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"time"
@@ -13,31 +12,46 @@ var (
 	ErrClientClosed = errors.New("client is closed")
 )
 
-func Dial(network, address string) (*Client, error) {
-	conn, err := net.Dial(network, address)
+func Dial(network string, addr *net.UDPAddr) (*Client, error) {
+	if addr == nil {
+		return nil, fmt.Errorf("server address is nil")
+	}
+
+	// conn, err := net.Dial(network, address)
+	conn, err := net.ListenUDP(network, nil)
 	if err != nil {
 		return nil, err
 	}
-	return NewClient(ClientOptions{
-		Connection: conn,
-	}), nil
+
+	cli := NewClient(conn, addr)
+	return cli, nil
 }
 
-type ClientOptions struct {
-	Agent      ClientAgent
-	Connection Connection
+// type ClientOptions struct {
+// 	Agent      ClientAgent
+// 	Connection Connection
 
-	//默认100ms
-	TimeoutRate time.Duration
-}
+// 	//默认100ms
+// 	TimeoutRate time.Duration
+// }
+
+// type Connection interface {
+// 	io.Reader
+// 	io.Writer
+// 	io.Closer
+// }
 
 //新建客户端
-func NewClient(options ClientOptions) *Client {
+func NewClient(conn net.PacketConn, addr net.Addr) *Client {
 	c := &Client{
-		close:  make(chan struct{}),
-		c:      options.Connection,
-		a:      options.Agent,
-		gcRate: options.TimeoutRate,
+		close: make(chan struct{}),
+		// c:      options.Connection,
+		// a:      options.Agent,
+		// gcRate: options.TimeoutRate,
+
+		serConn:      conn,
+		serAddr:      addr,
+		localAddrStr: conn.LocalAddr().String(),
 	}
 	if c.a == nil {
 		c.a = NewAgent(AgentOptions{})
@@ -45,6 +59,7 @@ func NewClient(options ClientOptions) *Client {
 	if c.gcRate == 0 {
 		c.gcRate = defaultTimeoutRate
 	}
+	fmt.Println("local:", c.localAddrStr)
 	c.wg.Add(2)
 	go c.readUntilClosed()
 	go c.collectUntilClosed()
@@ -52,20 +67,36 @@ func NewClient(options ClientOptions) *Client {
 }
 
 type Client struct {
-	a         ClientAgent
-	c         Connection
-	close     chan struct{}
-	closed    bool
-	closedMux sync.RWMutex
-	gcRate    time.Duration
-	wg        sync.WaitGroup
+	a ClientAgent
+	// c            Connection
+	close        chan struct{}
+	closed       bool
+	closedMux    sync.RWMutex
+	gcRate       time.Duration
+	wg           sync.WaitGroup
+	localAddrStr string
+
+	serConn net.PacketConn
+	serAddr net.Addr
+}
+
+func (c *Client) LocalAddr() string {
+	return c.localAddrStr
+}
+
+func (c *Client) ChangeServerAddr(addr string) error {
+	serverUDPAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return err
+	}
+	c.serAddr = serverUDPAddr
+	return nil
 }
 
 //读数据协程
 func (c *Client) readUntilClosed() {
 	defer c.wg.Done()
-	m := new(Message)
-	m.Raw = make([]byte, 1024)
+
 	for {
 		select {
 		//关闭通知
@@ -73,13 +104,30 @@ func (c *Client) readUntilClosed() {
 			return
 		default:
 		}
+
+		var (
+			n   int
+			err error
+		)
 		//读数据
-		_, err := m.ReadFrom(c.c)
+		m := new(Message)
+		m.Raw = make([]byte, 1024)
+		tBuf := m.Raw[:cap(m.Raw)]
+		n, _, err = c.serConn.ReadFrom(tBuf)
 		if err == nil {
-			//数据处理
-			if pErr := c.a.Process(m); pErr == ErrAgentClosed {
-				return
+			if err = m.Decode(); err != nil {
+				fmt.Println("decode fail,err:", err)
+			} else {
+				//数据处理
+				if pErr := c.a.Process(m); pErr == ErrAgentClosed {
+					return
+				}
 			}
+		} else {
+			if n == 0 {
+				fmt.Println("net close by peer")
+			}
+			fmt.Println("read invalid,", n)
 		}
 	}
 }
@@ -114,7 +162,7 @@ func (c *Client) Close() error {
 	c.closed = true
 	c.closedMux.Unlock()
 	agentErr := c.a.Close()
-	connErr := c.c.Close()
+	connErr := c.serConn.Close()
 	close(c.close)
 	c.wg.Wait()
 	if agentErr == nil && connErr == nil {
@@ -136,7 +184,7 @@ func (c *Client) Start(m *Message, d time.Time, f func(AgentEvent)) error {
 			return err
 		}
 	}
-	_, err := m.WriteTo(c.c)
+	_, err := c.serConn.WriteTo(m.Raw, c.serAddr)
 	if err != nil && f != nil {
 		//发送失败，停止代理
 		if stopErr := c.a.Stop(m.TransactionID); stopErr != nil {
@@ -151,35 +199,29 @@ func (c *Client) Indicate(m *Message) error {
 }
 
 //处理事务消息
-func (c *Client) Do(m *Message, d time.Time, f func(AgentEvent)) error {
+func (c *Client) SendMessage(m *Message, d time.Time, f func(AgentEvent)) error {
 	if f == nil {
 		return c.Indicate(m)
 	}
-	cond := sync.NewCond(new(sync.Mutex))
-	processed := false
-	wrapper := func(e AgentEvent) {
-		f(e)
-		cond.L.Lock()
-		processed = true
-		cond.Broadcast()
-		cond.L.Unlock()
-	}
-	if err := c.Start(m, d, wrapper); err != nil {
+	// cond := sync.NewCond(new(sync.Mutex))
+	// processed := false
+	// wrapper := func(e AgentEvent) {
+	// f(e)
+	// cond.L.Lock()
+	// processed = true
+	// cond.Broadcast()
+	// cond.L.Unlock()
+	// }
+	if err := c.Start(m, d, f); err != nil {
 		return err
 	}
-	cond.L.Lock()
-	//强同步请求
-	for !processed {
-		cond.Wait()
-	}
-	cond.L.Unlock()
+	// cond.L.Lock()
+	// //强同步请求
+	// for !processed {
+	// 	cond.Wait()
+	// }
+	// cond.L.Unlock()
 	return nil
-}
-
-type Connection interface {
-	io.Reader
-	io.Writer
-	io.Closer
 }
 
 type ClientAgent interface {

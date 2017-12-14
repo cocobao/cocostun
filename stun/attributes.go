@@ -2,6 +2,9 @@ package stun
 
 import (
 	"hash/crc32"
+	"net"
+
+	"github.com/cocobao/cocostun/utils"
 )
 
 type Attributes []RawAttribute
@@ -27,6 +30,53 @@ type RawAttribute struct {
 	Type   AttrType
 	Length uint16 // ignored while encoding
 	Value  []byte
+}
+
+//      0                   1                   2                   3
+//      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//     |x x x x x x x x|    Family     |         X-Port                |
+//     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//     |                X-Address (Variable)
+//     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//
+//             Figure 6: Format of XOR-MAPPED-ADDRESS Attribute
+func (v *RawAttribute) xorAddr(transID []byte) *Host {
+	xorIP := make([]byte, 16)
+	for i := 0; i < len(v.Value)-4; i++ {
+		xorIP[i] = v.Value[i+4] ^ transID[i]
+	}
+	family := uint16(v.Value[1])
+	port := bin.Uint16(v.Value[2:4])
+	// Truncate if IPv4, otherwise net.IP sometimes renders it as an IPv6 address.
+	if family == familyIPv4 {
+		xorIP = xorIP[:4]
+	}
+	x := bin.Uint16(transID[:2])
+	return &Host{family, net.IP(xorIP).String(), port ^ x}
+}
+
+//       0                   1                   2                   3
+//       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//      |0 0 0 0 0 0 0 0|    Family     |           Port                |
+//      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//      |                                                               |
+//      |                 Address (32 bits or 128 bits)                 |
+//      |                                                               |
+//      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//
+//               Figure 5: Format of MAPPED-ADDRESS Attribute
+func (v *RawAttribute) rawAddr() *Host {
+	host := new(Host)
+	host.family = uint16(v.Value[1])
+	host.port = bin.Uint16(v.Value[2:4])
+	// Truncate if IPv4, otherwise net.IP sometimes renders it as an IPv6 address.
+	if host.family == familyIPv4 {
+		v.Value = v.Value[:8]
+	}
+	host.ip = net.IP(v.Value[4:]).String()
+	return host
 }
 
 type AttrType uint16
@@ -63,9 +113,10 @@ const (
 
 // Attributes from comprehension-optional range (0x8000-0xFFFF).
 const (
-	AttrSoftware        AttrType = 0x8022 // SOFTWARE
-	AttrAlternateServer AttrType = 0x8023 // ALTERNATE-SERVER
-	AttrFingerprint     AttrType = 0x8028 // FINGERPRINT
+	AttrXorMappedAddressExp AttrType = 0x8020
+	AttrSoftware            AttrType = 0x8022 // SOFTWARE
+	AttrAlternateServer     AttrType = 0x8023 // ALTERNATE-SERVER
+	AttrFingerprint         AttrType = 0x8028 // FINGERPRINT
 )
 
 // Attributes from RFC 5245 ICE.
@@ -74,6 +125,13 @@ const (
 	AttrUseCandidate   AttrType = 0x0025 // USE-CANDIDATE
 	AttrICEControlled  AttrType = 0x8029 // ICE-CONTROLLED
 	AttrICEControlling AttrType = 0x802A // ICE-CONTROLLING
+)
+
+const (
+	AttrResponseOrigin = 0x802b
+	AttrOtherAddress   = 0x802c
+	AttrEcnCheckStun   = 0x802d
+	AttrCiscoFlowdata  = 0xc000
 )
 
 // Attributes from RFC 5766 TURN.
@@ -112,4 +170,56 @@ func (m *Message) AddChangeReqAttribute(changeIP bool, changePort bool) {
 		value[3] |= 0x02
 	}
 	m.Add(AttrChangeRequest, value)
+}
+
+type AttrInfos struct {
+	// ServerAddr  *Host // 服务器端地址
+	ChangedAddr *Host
+	MappedAddr  *Host //  external addr of client NAT
+	OtherAddr   *Host // to replace changedAddr in RFC 5780
+	Identical   bool  // nat的映射地址是否跟本地地址一样
+}
+
+//分析属性
+func (m *Message) AsyncAttrbutes(localAddr string) *AttrInfos {
+	infos := &AttrInfos{}
+	var (
+		mappedAddr  *Host
+		changedAddr *Host
+		otherAddr   *Host
+	)
+	for _, attr := range m.Attributes {
+		switch attr.Type {
+		//经过异或处理的外部映射地址
+		case AttrXORMappedAddress:
+			mappedAddr = attr.xorAddr(m.Raw[4:20])
+		case AttrXorMappedAddressExp:
+			mappedAddr = attr.xorAddr(m.Raw[4:20])
+		case AttrChangedAddress:
+			ca := attr.rawAddr()
+			if ca != nil {
+				changedAddr = newHostFromStr(ca.String())
+			}
+		case AttrOtherAddress:
+			ca := attr.rawAddr()
+			if ca != nil {
+				otherAddr = newHostFromStr(ca.String())
+			}
+		}
+	}
+
+	if mappedAddr != nil {
+		infos.MappedAddr = mappedAddr
+		infos.Identical = utils.IsLocalAddress(localAddr, mappedAddr.String())
+	}
+
+	if changedAddr != nil {
+		infos.ChangedAddr = changedAddr
+	}
+
+	if otherAddr != nil {
+		infos.OtherAddr = otherAddr
+	}
+
+	return infos
 }

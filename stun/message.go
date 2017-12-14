@@ -21,7 +21,9 @@ const (
 
 var (
 	ErrUnexpectedHeaderEOF = errors.New("unexpected EOF: not enough bytes to read header")
-	bin                    = binary.BigEndian
+	ErrAttributeNotFound   = errors.New("attribute not found")
+
+	bin = binary.BigEndian
 )
 
 //Message 协议格式
@@ -48,6 +50,15 @@ type Message struct {
 	Raw        []byte
 }
 
+//根据属性类型获取属性Value值
+func (m *Message) Get(t AttrType) ([]byte, error) {
+	v, ok := m.Attributes.Get(t)
+	if !ok {
+		return nil, ErrAttributeNotFound
+	}
+	return v.Value, nil
+}
+
 //生成随机消息id值
 func (m *Message) NewTransactionID() error {
 	_, err := io.ReadFull(rand.Reader, m.TransactionID[:])
@@ -71,27 +82,6 @@ func (m *Message) SetType(t MessageType) {
 //写入类型值到buff
 func (m *Message) WriteType() {
 	bin.PutUint16(m.Raw[0:2], m.Type.Value()) // message type
-}
-
-//io数据读取
-func (m *Message) ReadFrom(r io.Reader) (int64, error) {
-	tBuf := m.Raw[:cap(m.Raw)]
-	var (
-		n   int
-		err error
-	)
-	if n, err = r.Read(tBuf); err != nil {
-		return int64(n), err
-	}
-	m.Raw = tBuf[:n]
-	//对数据进行协议解析
-	return int64(n), m.Decode()
-}
-
-//io数据写入
-func (m *Message) WriteTo(w io.Writer) (int64, error) {
-	n, err := w.Write(m.Raw)
-	return int64(n), err
 }
 
 //读取的数据根据协议解析
